@@ -41,11 +41,13 @@
       "size" : "256x256"
     },
     {
+      "filename" : "s256m-iOS-Dark-512@1x.png",
       "idiom" : "mac",
       "scale" : "1x",
       "size" : "512x512"
     },
     {
+      "filename" : "s256m-iOS-Dark-1024@1x.png",
       "idiom" : "mac",
       "scale" : "2x",
       "size" : "512x512"
