@@ -7,7 +7,67 @@
 
 import Testing
 import Foundation
+@preconcurrency import DiskArbitration
 @testable import s256m
+
+// MARK: - Thread-Safe Test Synchronization Primitives
+
+private final class ProgressTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _callbackCount: Int = 0
+    private var _lastBytes: Int64 = 0
+
+    var callbackCount: Int {
+        lock.withLock { _callbackCount }
+    }
+
+    var lastBytes: Int64 {
+        lock.withLock { _lastBytes }
+    }
+
+    func record(bytes: Int64) {
+        lock.withLock {
+            _callbackCount += 1
+            _lastBytes = bytes
+        }
+    }
+}
+
+private final class WritePhaseTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _sawWriting: Bool = false
+    private var _sawVerifying: Bool = false
+    private var _sawCompleted: Bool = false
+
+    var sawWriting: Bool {
+        lock.withLock { _sawWriting }
+    }
+
+    var sawVerifying: Bool {
+        lock.withLock { _sawVerifying }
+    }
+
+    var sawCompleted: Bool {
+        lock.withLock { _sawCompleted }
+    }
+
+    func record(_ state: WriteState) {
+        lock.withLock {
+            switch state {
+            case .writing:
+                _sawWriting = true
+            case .verifying:
+                _sawVerifying = true
+            case .completed:
+                _sawCompleted = true
+            default:
+                break
+            }
+        }
+    }
+}
+
+// MARK: - Test Suites
 
 struct ChecksumEngineTests {
 
@@ -50,16 +110,14 @@ struct ChecksumEngineTests {
         }
 
         let engine = ChecksumEngine()
-        var progressCallbacks = 0
-        var lastReportedBytes: Int64 = 0
+        let tracker = ProgressTracker()
 
         // Use a small buffer size (256 KB) to force multiple streaming chunk reads
         let result = try await engine.computeChecksums(
             for: fileURL,
             bufferSize: 256 * 1024
         ) { progress in
-            progressCallbacks += 1
-            lastReportedBytes = progress.bytesProcessed
+            tracker.record(bytes: progress.bytesProcessed)
         }
 
         let expectedInMemoryResult = await engine.computeChecksums(for: pseudoRandomData)
@@ -67,8 +125,8 @@ struct ChecksumEngineTests {
         #expect(result.sha256 == expectedInMemoryResult.sha256)
         #expect(result.md5 == expectedInMemoryResult.md5)
         #expect(result.fileByteCount == Int64(totalSize))
-        #expect(lastReportedBytes == Int64(totalSize))
-        #expect(progressCallbacks > 0)
+        #expect(tracker.lastBytes == Int64(totalSize))
+        #expect(tracker.callbackCount > 0)
     }
 
     @Test func testHashMatchingLogic() {
@@ -117,5 +175,296 @@ struct ChecksumEngineTests {
         #expect(drive.isInternal == false)
         #expect(drive.displayName.contains("disk3"))
         #expect(drive.displayName.contains("INSTALLER"))
+    }
+}
+
+struct DiskSafetyTests {
+
+    @Test func testExtractWholeDiskBSDName() {
+        #expect(DiskSafetyValidator.extractWholeDiskBSDName(from: "/dev/disk3s1s1") == "disk3")
+        #expect(DiskSafetyValidator.extractWholeDiskBSDName(from: "/dev/rdisk4") == "disk4")
+        #expect(DiskSafetyValidator.extractWholeDiskBSDName(from: "disk12s2") == "disk12")
+        #expect(DiskSafetyValidator.extractWholeDiskBSDName(from: "disk0") == "disk0")
+        #expect(DiskSafetyValidator.extractWholeDiskBSDName(from: "/dev/disk5") == "disk5")
+    }
+
+    @Test func testSystemDiskDetectionFindsBootDrive() {
+        let systemDisks = DiskSafetyValidator.querySystemDisks()
+        // The host machine must have at least one detected system disk (e.g. disk3 or disk1)
+        #expect(!systemDisks.isEmpty)
+    }
+
+    @Test func testEvaluationBlocksInternalDisks() {
+        let internalDesc: [String: Any] = [
+            kDADiskDescriptionMediaBSDNameKey as String: "disk0",
+            kDADiskDescriptionMediaWholeKey as String: true,
+            kDADiskDescriptionDeviceInternalKey as String: true,
+            kDADiskDescriptionMediaWritableKey as String: true,
+            kDADiskDescriptionMediaSizeKey as String: NSNumber(value: 1_000_000_000_000),
+            kDADiskDescriptionDeviceProtocolKey as String: "Apple Fabric"
+        ]
+
+        let (isSafe, reason) = DiskSafetyValidator.evaluateDisk(
+            description: internalDesc,
+            systemDiskBlacklist: []
+        )
+        #expect(isSafe == false)
+        #expect(reason?.contains("internal") == true)
+    }
+
+    @Test func testEvaluationBlocksSystemDisksInBlacklist() {
+        let targetDesc: [String: Any] = [
+            kDADiskDescriptionMediaBSDNameKey as String: "disk2",
+            kDADiskDescriptionMediaWholeKey as String: true,
+            kDADiskDescriptionDeviceInternalKey as String: false,
+            kDADiskDescriptionMediaWritableKey as String: true,
+            kDADiskDescriptionMediaSizeKey as String: NSNumber(value: 32_000_000_000),
+            kDADiskDescriptionDeviceProtocolKey as String: "USB",
+            kDADiskDescriptionMediaRemovableKey as String: true
+        ]
+
+        let (isSafe, reason) = DiskSafetyValidator.evaluateDisk(
+            description: targetDesc,
+            systemDiskBlacklist: ["disk2"]
+        )
+        #expect(isSafe == false)
+        #expect(reason?.contains("system or boot") == true)
+    }
+
+    @Test func testEvaluationBlocksPartitions() {
+        let partitionDesc: [String: Any] = [
+            kDADiskDescriptionMediaBSDNameKey as String: "disk4s1",
+            kDADiskDescriptionMediaWholeKey as String: false,
+            kDADiskDescriptionDeviceInternalKey as String: false,
+            kDADiskDescriptionMediaWritableKey as String: true,
+            kDADiskDescriptionMediaSizeKey as String: NSNumber(value: 16_000_000_000),
+            kDADiskDescriptionDeviceProtocolKey as String: "USB"
+        ]
+
+        let (isSafe, reason) = DiskSafetyValidator.evaluateDisk(
+            description: partitionDesc,
+            systemDiskBlacklist: []
+        )
+        #expect(isSafe == false)
+        #expect(reason?.contains("partition") == true)
+    }
+
+    @Test func testEvaluationBlocksVirtualAndFabricProtocols() {
+        let virtualDesc: [String: Any] = [
+            kDADiskDescriptionMediaBSDNameKey as String: "disk7",
+            kDADiskDescriptionMediaWholeKey as String: true,
+            kDADiskDescriptionDeviceInternalKey as String: false,
+            kDADiskDescriptionMediaWritableKey as String: true,
+            kDADiskDescriptionMediaSizeKey as String: NSNumber(value: 20_000_000_000),
+            kDADiskDescriptionDeviceProtocolKey as String: "Virtual Interface",
+            kDADiskDescriptionMediaRemovableKey as String: true
+        ]
+
+        let (isSafe, reason) = DiskSafetyValidator.evaluateDisk(
+            description: virtualDesc,
+            systemDiskBlacklist: []
+        )
+        #expect(isSafe == false)
+        #expect(reason?.contains("Virtual Interface") == true)
+    }
+
+    @Test func testEvaluationAcceptsValidExternalUSBFlashDrive() {
+        let usbDesc: [String: Any] = [
+            kDADiskDescriptionMediaBSDNameKey as String: "disk4",
+            kDADiskDescriptionMediaWholeKey as String: true,
+            kDADiskDescriptionDeviceInternalKey as String: false,
+            kDADiskDescriptionMediaWritableKey as String: true,
+            kDADiskDescriptionMediaSizeKey as String: NSNumber(value: 64_000_000_000),
+            kDADiskDescriptionDeviceProtocolKey as String: "USB",
+            kDADiskDescriptionMediaRemovableKey as String: true,
+            kDADiskDescriptionDeviceVendorKey as String: "SanDisk",
+            kDADiskDescriptionDeviceModelKey as String: "Ultra Flair",
+            kDADiskDescriptionMediaNameKey as String: "SanDisk Media"
+        ]
+
+        let (isSafe, reason) = DiskSafetyValidator.evaluateDisk(
+            description: usbDesc,
+            systemDiskBlacklist: ["disk1", "disk3"]
+        )
+        #expect(isSafe == true)
+        #expect(reason == nil)
+
+        let drive = DiskSafetyValidator.parseTargetDrive(
+            description: usbDesc,
+            volumeNames: ["ARCH_LINUX", "EFI"]
+        )
+        #expect(drive != nil)
+        #expect(drive?.bsdName == "disk4")
+        #expect(drive?.vendor == "SanDisk")
+        #expect(drive?.model == "Ultra Flair")
+        #expect(drive?.volumeNames == ["ARCH_LINUX", "EFI"])
+        #expect(drive?.displayName.contains("disk4") == true)
+    }
+}
+
+struct DiskWriterTests {
+
+    @Test func testWriteAndVerifyToVirtualFile() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let sourceURL = tempDir.appendingPathComponent("s256m_source_\(UUID().uuidString).iso")
+        let destURL = tempDir.appendingPathComponent("s256m_dest_\(UUID().uuidString).img")
+
+        // 1.5 MB test payload
+        let payloadSize = 1536 * 1024
+        var testData = Data(count: payloadSize)
+        for i in 0..<payloadSize {
+            testData[i] = UInt8((i * 17 + 3) % 256)
+        }
+        try testData.write(to: sourceURL)
+
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destURL)
+        }
+
+        let writer = DiskWriter()
+        let phaseTracker = WritePhaseTracker()
+
+        let result = try await writer.writeAndVerify(
+            imageURL: sourceURL,
+            destinationPath: destURL.path,
+            expectedCapacity: Int64(payloadSize * 2),
+            verify: true,
+            chunkSize: 256 * 1024
+        ) { progress in
+            phaseTracker.record(progress)
+        }
+
+        #expect(phaseTracker.sawWriting)
+        #expect(phaseTracker.sawVerifying)
+        #expect(phaseTracker.sawCompleted)
+        #expect(result.fileByteCount == Int64(payloadSize))
+
+        // Read destination file back and check byte-for-byte equality
+        let writtenData = try Data(contentsOf: destURL)
+        #expect(writtenData == testData)
+
+        let engine = ChecksumEngine()
+        let expectedResult = await engine.computeChecksums(for: testData)
+        #expect(result.sha256 == expectedResult.sha256)
+        #expect(result.md5 == expectedResult.md5)
+    }
+
+    @Test func testCapacityCheckBlocksUndersizedDestinations() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let sourceURL = tempDir.appendingPathComponent("s256m_cap_\(UUID().uuidString).iso")
+        let destURL = tempDir.appendingPathComponent("s256m_dest_\(UUID().uuidString).img")
+
+        let payload = Data(repeating: 0xAA, count: 1024 * 1024) // 1 MB
+        try payload.write(to: sourceURL)
+
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destURL)
+        }
+
+        let writer = DiskWriter()
+        do {
+            // Target capacity is 512 KB, but image is 1 MB
+            try await writer.writeAndVerify(
+                imageURL: sourceURL,
+                destinationPath: destURL.path,
+                expectedCapacity: 512 * 1024,
+                verify: false
+            )
+            #expect(Bool(false), "Should have thrown insufficientCapacity error")
+        } catch let error as DiskWriterError {
+            switch error {
+            case .insufficientCapacity(let req, let avail):
+                #expect(req == 1024 * 1024)
+                #expect(avail == 512 * 1024)
+            default:
+                #expect(Bool(false), "Unexpected error: \(error)")
+            }
+        }
+    }
+}
+
+@MainActor
+struct AppStateTests {
+
+    @Test func testInitialAppState() {
+        let appState = AppState(autoStartMonitoring: false)
+        #expect(appState.selectedImageURL == nil)
+        #expect(appState.imageByteCount == 0)
+        #expect(appState.checksumResult == nil)
+        #expect(appState.isCalculatingChecksum == false)
+        #expect(appState.selectedDrive == nil)
+        #expect(appState.canStartWrite == false)
+    }
+
+    @Test func testSelectImageAndClear() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let sampleURL = tempDir.appendingPathComponent("s256m_ui_test_\(UUID().uuidString).iso")
+        let sampleData = Data("Small Test ISO Content".utf8)
+        try sampleData.write(to: sampleURL)
+
+        defer {
+            try? FileManager.default.removeItem(at: sampleURL)
+        }
+
+        let appState = AppState(autoStartMonitoring: false)
+        appState.selectImage(url: sampleURL)
+
+        #expect(appState.selectedImageURL == sampleURL)
+        #expect(appState.imageByteCount == Int64(sampleData.count))
+
+        // Wait briefly for streaming hashing to complete
+        for _ in 0..<20 {
+            if appState.checksumResult != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(appState.checksumResult != nil)
+        #expect(appState.isCalculatingChecksum == false)
+        #expect(appState.checksumProgressFraction == 1.0)
+
+        // Clear image
+        appState.clearSelectedImage()
+        #expect(appState.selectedImageURL == nil)
+        #expect(appState.checksumResult == nil)
+    }
+
+    @Test func testCanStartWriteConditions() {
+        let appState = AppState(autoStartMonitoring: false)
+
+        // No image, no drive
+        #expect(appState.canStartWrite == false)
+
+        // Setup mock image
+        appState.selectedImageURL = URL(fileURLWithPath: "/tmp/fake.iso")
+        appState.imageByteCount = 4_000_000_000 // 4 GB
+
+        // No drive yet
+        #expect(appState.canStartWrite == false)
+
+        // Drive with insufficient capacity (2 GB)
+        appState.selectedDrive = TargetDrive(
+            bsdName: "disk4",
+            mediaName: "Small Flash",
+            totalBytes: 2_000_000_000,
+            isRemovable: true,
+            isEjectable: true,
+            isInternal: false,
+            isWritable: true
+        )
+        #expect(appState.canStartWrite == false)
+
+        // Drive with ample capacity (32 GB)
+        appState.selectedDrive = TargetDrive(
+            bsdName: "disk4",
+            mediaName: "Large Flash",
+            totalBytes: 32_000_000_000,
+            isRemovable: true,
+            isEjectable: true,
+            isInternal: false,
+            isWritable: true
+        )
+        #expect(appState.canStartWrite == true)
     }
 }

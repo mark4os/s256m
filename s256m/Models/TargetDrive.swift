@@ -7,65 +7,54 @@
 
 import Foundation
 
-/// Represents a validated, safe external or removable storage device candidate.
-public struct TargetDrive: Identifiable, Sendable, Equatable, Hashable {
-    /// Unique identifier matching the BSD whole-disk name (e.g., "disk4").
-    public var id: String { bsdName }
-
-    /// Whole disk BSD name (e.g., "disk4").
+/// Represents a validated, external removable storage device that is safe to target.
+nonisolated public struct TargetDrive: Identifiable, Hashable, Sendable {
+    /// BSD disk name, e.g. "disk4".
     public let bsdName: String
 
-    /// POSIX path to the character device for direct raw block I/O (e.g., "/dev/rdisk4").
-    public var rawDevicePath: String {
-        "/dev/r\(bsdName)"
-    }
+    /// Friendly media name, e.g. "SanDisk Ultra USB 3.0 Media".
+    public let mediaName: String?
 
-    /// POSIX path to the block device (e.g., "/dev/disk4").
-    public var blockDevicePath: String {
-        "/dev/\(bsdName)"
-    }
-
-    /// Physical media or manufacturer name (e.g. "SanDisk Ultra Fit", "Generic Flash Disk").
-    public let mediaName: String
-
-    /// Optional hardware vendor string.
+    /// Hardware vendor string, e.g. "SanDisk".
     public let vendor: String?
 
-    /// Optional hardware model string.
+    /// Hardware model string, e.g. "Ultra USB 3.0".
     public let model: String?
 
-    /// Interconnect protocol (e.g., "USB", "Secure Digital").
+    /// Connection protocol, e.g. "USB", "Secure Digital", "Thunderbolt".
     public let protocolName: String?
 
-    /// Total capacity in bytes.
+    /// Total storage capacity in bytes.
     public let totalBytes: Int64
 
-    /// Removable media flag according to DiskArbitration/IOKit.
+    /// Whether macOS reports the device as removable.
     public let isRemovable: Bool
 
-    /// Ejectable flag according to DiskArbitration/IOKit.
+    /// Whether macOS reports the device as ejectable.
     public let isEjectable: Bool
 
-    /// Hardware internal flag according to DiskArbitration.
+    /// Whether macOS reports the device as internal (must be false).
     public let isInternal: Bool
 
-    /// Media writable status.
+    /// Whether the medium is writable.
     public let isWritable: Bool
 
-    /// Volume/partition labels currently mounted from this disk.
+    /// Volume names of currently mounted partitions on this physical disk.
     public let volumeNames: [String]
+
+    public var id: String { bsdName }
 
     public init(
         bsdName: String,
-        mediaName: String,
+        mediaName: String? = nil,
         vendor: String? = nil,
         model: String? = nil,
         protocolName: String? = nil,
         totalBytes: Int64,
-        isRemovable: Bool,
-        isEjectable: Bool,
-        isInternal: Bool,
-        isWritable: Bool,
+        isRemovable: Bool = true,
+        isEjectable: Bool = true,
+        isInternal: Bool = false,
+        isWritable: Bool = true,
         volumeNames: [String] = []
     ) {
         self.bsdName = bsdName
@@ -81,23 +70,36 @@ public struct TargetDrive: Identifiable, Sendable, Equatable, Hashable {
         self.volumeNames = volumeNames
     }
 
-    /// Human-readable capacity formatted in binary units (e.g. 15.6 GB).
-    public var formattedCapacity: String {
-        ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+    /// Path to raw disk character device, e.g. "/dev/rdisk4" (for fast raw block writes).
+    public var rawDevicePath: String {
+        "/dev/r\(bsdName)"
     }
 
-    /// Clean display title for UI pickers.
+    /// Path to block disk device, e.g. "/dev/disk4".
+    public var blockDevicePath: String {
+        "/dev/\(bsdName)"
+    }
+
+    /// Human-friendly display title combining vendor/model and BSD identifier.
     public var displayName: String {
-        let name: String
-        if !mediaName.isEmpty && mediaName != bsdName {
-            name = mediaName
-        } else if let model, !model.isEmpty {
-            name = model
-        } else {
-            name = "External Drive"
+        var components: [String] = []
+
+        if let vendor = vendor, !vendor.isEmpty {
+            components.append(vendor)
+        }
+        if let model = model, !model.isEmpty, model != vendor {
+            components.append(model)
+        } else if let mediaName = mediaName, !mediaName.isEmpty, components.isEmpty {
+            components.append(mediaName)
         }
 
-        let volumesStr = volumeNames.isEmpty ? "" : " [\(volumeNames.joined(separator: ", "))]"
-        return "\(name) (\(formattedCapacity)) — \(bsdName)\(volumesStr)"
+        let name = components.isEmpty ? "Removable Drive" : components.joined(separator: " ")
+        let volumes = volumeNames.isEmpty ? "" : " (\(volumeNames.joined(separator: ", ")))"
+        return "\(name) - \(formattedCapacity) [\(bsdName)]\(volumes)"
+    }
+
+    /// Formatted total storage size in decimal or binary units.
+    public var formattedCapacity: String {
+        ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
     }
 }

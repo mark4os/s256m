@@ -13,5 +13,9 @@ struct s256mApp: App {
         WindowGroup {
             ContentView()
         }
+        .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified)
+        .defaultSize(width: 760, height: 800)
+        .windowResizability(.contentMinSize)
     }
 }

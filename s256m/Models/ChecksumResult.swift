@@ -8,14 +8,14 @@
 import Foundation
 
 /// Represents the comparison result of a user-supplied hash against computed hashes.
-public enum HashMatchType: Sendable, Equatable {
+nonisolated public enum HashMatchType: Sendable, Equatable {
     case sha256
     case md5
     case none
 }
 
 /// The immutable result of a completed checksum calculation.
-public struct ChecksumResult: Sendable, Equatable {
+nonisolated public struct ChecksumResult: Sendable, Equatable {
     /// Lowercased hex-encoded SHA-256 digest string.
     public let sha256: String
 
