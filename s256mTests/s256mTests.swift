@@ -385,6 +385,69 @@ struct DiskWriterTests {
     }
 }
 
+// MARK: - Tier 3: Authenticity Tests
+
+struct AuthenticityTests {
+
+    @Test func testSignatureStatusEnumProperties() {
+        let noneStatus = SignatureStatus.none
+        #expect(noneStatus.isVerified == false)
+        #expect(noneStatus.publisher == nil)
+        #expect(noneStatus.teamID == nil)
+        #expect(noneStatus.isNotarized == false)
+
+        let checkingStatus = SignatureStatus.checking
+        #expect(checkingStatus.isVerified == false)
+
+        let verifiedStatus = SignatureStatus.verified(
+            publisher: "Developer ID Application: Acorn Ltd",
+            teamID: "876XYZ4321",
+            isNotarized: true
+        )
+        #expect(verifiedStatus.isVerified == true)
+        #expect(verifiedStatus.publisher == "Developer ID Application: Acorn Ltd")
+        #expect(verifiedStatus.teamID == "876XYZ4321")
+        #expect(verifiedStatus.isNotarized == true)
+        #expect(verifiedStatus.displayTitle == "Developer ID Application: Acorn Ltd")
+
+        let unsignedStatus = SignatureStatus.unsigned
+        #expect(unsignedStatus.isVerified == false)
+        #expect(unsignedStatus.displayTitle == "Unsigned Media")
+
+        let invalidStatus = SignatureStatus.invalid(reason: "Root certificate revoked")
+        #expect(invalidStatus.isVerified == false)
+        #expect(invalidStatus.displayTitle.contains("Root certificate revoked"))
+    }
+
+    @Test func testEvaluateUnsignedTempFile() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let rawIsoURL = tempDir.appendingPathComponent("s256m_raw_\(UUID().uuidString).iso")
+        try "RAW LINUX DISK IMAGE DATA".data(using: .utf8)?.write(to: rawIsoURL)
+
+        defer {
+            try? FileManager.default.removeItem(at: rawIsoURL)
+        }
+
+        let engine = AuthenticityEngine()
+        let status = await engine.evaluate(url: rawIsoURL)
+
+        #expect(status == .unsigned)
+    }
+
+    @Test func testEvaluateSystemSignedApp() async {
+        let calcURL = URL(fileURLWithPath: "/System/Applications/Calculator.app")
+        guard FileManager.default.fileExists(atPath: calcURL.path) else { return }
+
+        let engine = AuthenticityEngine()
+        let status = await engine.evaluate(url: calcURL)
+
+        #expect(status.isVerified == true)
+        if case .verified(let publisher, _, _) = status {
+            #expect(!publisher.isEmpty)
+        }
+    }
+}
+
 @MainActor
 struct AppStateTests {
 
@@ -394,6 +457,7 @@ struct AppStateTests {
         #expect(appState.imageByteCount == 0)
         #expect(appState.checksumResult == nil)
         #expect(appState.isCalculatingChecksum == false)
+        #expect(appState.signatureStatus == .none)
         #expect(appState.selectedDrive == nil)
         #expect(appState.canStartWrite == false)
     }
@@ -414,20 +478,22 @@ struct AppStateTests {
         #expect(appState.selectedImageURL == sampleURL)
         #expect(appState.imageByteCount == Int64(sampleData.count))
 
-        // Wait briefly for streaming hashing to complete
-        for _ in 0..<20 {
-            if appState.checksumResult != nil { break }
+        // Wait briefly for streaming hashing and authenticity to complete
+        for _ in 0..<30 {
+            if appState.checksumResult != nil && appState.signatureStatus != .checking { break }
             try await Task.sleep(for: .milliseconds(20))
         }
 
         #expect(appState.checksumResult != nil)
         #expect(appState.isCalculatingChecksum == false)
         #expect(appState.checksumProgressFraction == 1.0)
+        #expect(appState.signatureStatus == .unsigned)
 
         // Clear image
         appState.clearSelectedImage()
         #expect(appState.selectedImageURL == nil)
         #expect(appState.checksumResult == nil)
+        #expect(appState.signatureStatus == .none)
     }
 
     @Test func testCanStartWriteConditions() {

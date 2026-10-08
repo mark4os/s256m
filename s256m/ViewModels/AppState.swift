@@ -9,7 +9,7 @@ import SwiftUI
 import Observation
 
 /// Central application state coordinator managing image selection, checksum jobs,
-/// live drive monitoring, and block writing workflows.
+/// live drive monitoring, block writing workflows, and 3-tier verification architecture.
 @Observable
 @MainActor
 public final class AppState {
@@ -22,7 +22,7 @@ public final class AppState {
     /// Size in bytes of the selected image.
     public var imageByteCount: Int64 = 0
 
-    /// Calculated or calculating checksum results.
+    /// Calculated or calculating checksum results (Tier 1 & Tier 2).
     public var checksumResult: ChecksumResult?
 
     /// Whether a checksum computation task is currently active.
@@ -36,6 +36,9 @@ public final class AppState {
 
     /// User-supplied hash candidate string to compare against computed digests.
     public var candidateHash: String = ""
+
+    /// Digital signature and authenticity state (Tier 3).
+    public var signatureStatus: SignatureStatus = .none
 
     // MARK: - Drive Selection State
 
@@ -62,8 +65,12 @@ public final class AppState {
     /// Active checksum computation task for cancellation.
     private var checksumTask: Task<Void, Never>?
 
+    /// Active authenticity evaluation task for cancellation.
+    private var authenticityTask: Task<Void, Never>?
+
     /// Services
     private let checksumEngine = ChecksumEngine()
+    private let authenticityEngine = AuthenticityEngine()
     private let diskWriter = DiskWriter()
 
     public init(diskMonitor: DiskMonitor? = nil, autoStartMonitoring: Bool = true) {
@@ -74,29 +81,34 @@ public final class AppState {
         }
     }
 
-    // MARK: - Image Selection & Checksum Computation
+    // MARK: - Image Selection & Simultaneous Hashing / Authenticity
 
-    /// Selects a disk image and starts single-pass SHA-256 + MD5 calculation.
+    /// Selects a disk image and starts single-pass SHA-256 + MD5 calculation and authenticity inspection simultaneously.
     public func selectImage(url: URL) {
         cancelChecksumCalculation()
+        cancelAuthenticityEvaluation()
 
         selectedImageURL = url
         checksumResult = nil
         candidateHash = ""
+        signatureStatus = .checking
 
         let attr = try? FileManager.default.attributesOfItem(atPath: url.path)
         imageByteCount = (attr?[.size] as? NSNumber)?.int64Value ?? 0
 
         startChecksumCalculation(for: url)
+        startAuthenticityEvaluation(for: url)
     }
 
-    /// Resets the selected image and cancels any ongoing hashing.
+    /// Resets the selected image and cancels any ongoing hashing or authenticity evaluation.
     public func clearSelectedImage() {
         cancelChecksumCalculation()
+        cancelAuthenticityEvaluation()
         selectedImageURL = nil
         imageByteCount = 0
         checksumResult = nil
         candidateHash = ""
+        signatureStatus = .none
     }
 
     /// Initiates streaming checksum computation with real-time progress callbacks.
@@ -133,6 +145,25 @@ public final class AppState {
         checksumTask?.cancel()
         checksumTask = nil
         isCalculatingChecksum = false
+    }
+
+    /// Initiates digital signature inspection and notarization check.
+    public func startAuthenticityEvaluation(for url: URL) {
+        authenticityTask?.cancel()
+        signatureStatus = .checking
+
+        authenticityTask = Task { [weak self] in
+            guard let self else { return }
+            let status = await self.authenticityEngine.evaluate(url: url)
+            guard !Task.isCancelled else { return }
+            self.signatureStatus = status
+        }
+    }
+
+    /// Cancels any active authenticity evaluation.
+    public func cancelAuthenticityEvaluation() {
+        authenticityTask?.cancel()
+        authenticityTask = nil
     }
 
     // MARK: - Write Pipeline Execution

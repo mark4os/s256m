@@ -8,8 +8,10 @@
 import SwiftUI
 import AppKit
 
-/// Card displaying computed SHA-256 and MD5 cryptographic digests, live calculation progress,
-/// and live integrity comparison against user-provided official hashes.
+/// Card displaying the 3-tier verification architecture:
+/// 1. Level 1: SHA-256 (Bit-level cryptographic integrity & official hash matching).
+/// 2. Level 2: MD5 (Legacy hardware and firmware compatibility).
+/// 3. Level 3: Digital Signature & Authenticity (Apple code signature, publisher identity, notarization).
 struct ChecksumCardView: View {
     @Bindable var appState: AppState
     @State private var copiedSHA256: Bool = false
@@ -18,6 +20,9 @@ struct ChecksumCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             headerView
+
+            // Tier 3: Digital Signature & Authenticity
+            AuthenticityBadgeView(status: appState.signatureStatus)
 
             if appState.isCalculatingChecksum {
                 calculatingProgressView
@@ -49,7 +54,7 @@ struct ChecksumCardView: View {
 
     private var headerView: some View {
         HStack {
-            Label("Cryptographic Integrity", systemImage: "checkmark.shield")
+            Label("Verification Architecture", systemImage: "shield.checkered")
                 .font(.headline)
 
             Spacer()
@@ -109,12 +114,12 @@ struct ChecksumCardView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Completed Hashes
+    // MARK: - Completed Hashes (Tier 1 & Tier 2)
 
     private func completedHashesView(result: ChecksumResult) -> some View {
         VStack(spacing: 10) {
             hashRow(
-                label: "SHA-256",
+                tierLabel: "Tier 1: SHA-256 (Bit-level Integrity)",
                 hash: result.sha256,
                 isCopied: copiedSHA256,
                 isMatch: appState.hashMatch == .sha256
@@ -127,7 +132,7 @@ struct ChecksumCardView: View {
             }
 
             hashRow(
-                label: "MD5",
+                tierLabel: "Tier 2: MD5 (Legacy Hardware Compatibility)",
                 hash: result.md5,
                 isCopied: copiedMD5,
                 isMatch: appState.hashMatch == .md5
@@ -143,7 +148,7 @@ struct ChecksumCardView: View {
     }
 
     private func hashRow(
-        label: String,
+        tierLabel: String,
         hash: String,
         isCopied: Bool,
         isMatch: Bool,
@@ -151,7 +156,7 @@ struct ChecksumCardView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(label)
+                Text(tierLabel)
                     .font(.caption.weight(.bold))
                     .foregroundStyle(isMatch ? Color.green : Color.secondary)
 
@@ -252,11 +257,11 @@ struct ChecksumCardView: View {
         } else {
             switch appState.hashMatch {
             case .sha256:
-                Label("Matches SHA-256", systemImage: "checkmark.circle.fill")
+                Label("Matches SHA-256 (Tier 1)", systemImage: "checkmark.circle.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.green)
             case .md5:
-                Label("Matches MD5", systemImage: "checkmark.circle.fill")
+                Label("Matches MD5 (Tier 2)", systemImage: "checkmark.circle.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.green)
             case .none:
